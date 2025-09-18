@@ -10,10 +10,12 @@
 #include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
 #include "Net/UnrealNetwork.h"
+#include "UObject/UObjectGlobals.h"
 
 APoE2ProjectileBase::APoE2ProjectileBase()
 {
-    PrimaryActorTick.bCanEverTick = false;
+    PrimaryActorTick.bCanEverTick = true;
+    SetActorTickEnabled(false);
 
     // Enable replication as required
     bReplicates = true;
@@ -44,9 +46,41 @@ void APoE2ProjectileBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
     DOREPLIFETIME(APoE2ProjectileBase, CurrentSpec);
 }
 
-void APoE2ProjectileBase::InitFromSpec(const FSkillSpec& InSpec)
+void APoE2ProjectileBase::InitFromSpec(const FSkillSpec& InSpec, UAbilitySystemComponent* InOwnerASC, const TArray<TScriptInterface<IMechanicHandler>>& HandlerPrototypes)
 {
     CurrentSpec = InSpec;
+    OwnerASC = InOwnerASC;
+
+    ActiveHandlers.Reset();
+
+    for (const TScriptInterface<IMechanicHandler>& HandlerPrototype : HandlerPrototypes)
+    {
+        UObject* PrototypeObject = HandlerPrototype.GetObject();
+        if (!PrototypeObject)
+        {
+            continue;
+        }
+
+        UObject* DuplicatedObject = DuplicateObject(PrototypeObject, this);
+        if (!DuplicatedObject)
+        {
+            continue;
+        }
+
+        TScriptInterface<IMechanicHandler> HandlerInstance;
+        HandlerInstance.SetObject(DuplicatedObject);
+        HandlerInstance.SetInterface(Cast<IMechanicHandler>(DuplicatedObject));
+
+        if (!HandlerInstance.GetInterface())
+        {
+            continue;
+        }
+
+        ActiveHandlers.Add(HandlerInstance);
+        IMechanicHandler::Execute_OnSpawn(DuplicatedObject, this, CurrentSpec);
+    }
+
+    SetActorTickEnabled(ActiveHandlers.Num() > 0);
 
     // Set projectile speed
     if (MovementComponent && CurrentSpec.ProjectileSpeed > 0.0f)
@@ -78,7 +112,29 @@ void APoE2ProjectileBase::BeginPlay()
 
 void APoE2ProjectileBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    for (const TScriptInterface<IMechanicHandler>& Handler : ActiveHandlers)
+    {
+        if (Handler)
+        {
+            IMechanicHandler::Execute_OnEnd(Handler.GetObject(), this, CurrentSpec);
+        }
+    }
+    ActiveHandlers.Reset();
+
     Super::EndPlay(EndPlayReason);
+}
+
+void APoE2ProjectileBase::Tick(float DeltaSeconds)
+{
+    Super::Tick(DeltaSeconds);
+
+    for (const TScriptInterface<IMechanicHandler>& Handler : ActiveHandlers)
+    {
+        if (Handler)
+        {
+            IMechanicHandler::Execute_OnTick(Handler.GetObject(), this, DeltaSeconds, CurrentSpec);
+        }
+    }
 }
 
 void APoE2ProjectileBase::OnHit(UPrimitiveComponent* HitComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
@@ -128,35 +184,39 @@ void APoE2ProjectileBase::OnHit(UPrimitiveComponent* HitComp, AActor* OtherActor
     FGameplayTag ImpactCueTag = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.Projectile.Impact"));
     UPoE2CueManager::PlayNetCue(this, ImpactCueTag, CueParams);
 
-    // Handle projectile mechanics by iterating through handlers from the spec
-    // All game mechanics (including pierce) are now handled by MechanicHandlers
-    for (TSubclassOf<UObject> HandlerClass : CurrentSpec.MechanicHandlers)
+    // Handle projectile mechanics by iterating through handler instances
+    for (const TScriptInterface<IMechanicHandler>& Handler : ActiveHandlers)
     {
-        if (HandlerClass)
+        if (!Handler)
         {
-            if (IMechanicHandler* Handler = Cast<IMechanicHandler>(HandlerClass->GetDefaultObject()))
-            {
-                EHitHandlerResult Result = Handler->OnHit_Implementation(this, OtherActor, Hit, CurrentSpec);
+            continue;
+        }
 
-                if (Result == EHitHandlerResult::Stop)
-                {
-                    // Handler decided to destroy the projectile
-                    UE_LOG(LogPoE2Framework, Log, TEXT("Handler stopped projectile"));
-                    Destroy();
-                    return;
-                }
-                else if (Result == EHitHandlerResult::Pierce)
-                {
-                    // Handler decided to pierce, continue without destroying
-                    UE_LOG(LogPoE2Framework, Log, TEXT("Handler allowed projectile to pierce through target"));
-                    return;
-                }
-                // Continue means keep processing other handlers
-            }
+        EHitHandlerResult Result = IMechanicHandler::Execute_OnHit(Handler.GetObject(), this, OtherActor, Hit, CurrentSpec);
+
+        if (Result == EHitHandlerResult::Stop)
+        {
+            UE_LOG(LogPoE2Framework, Log, TEXT("Handler stopped projectile"));
+            Destroy();
+            return;
+        }
+        else if (Result == EHitHandlerResult::Pierce)
+        {
+            UE_LOG(LogPoE2Framework, Log, TEXT("Handler allowed projectile to pierce through target"));
+            return;
+        }
+        else if (Result == EHitHandlerResult::Chain)
+        {
+            UE_LOG(LogPoE2Framework, Log, TEXT("Handler requested chain - not yet implemented, continuing"));
         }
     }
 
     // If no handler made a decision, default behavior is to destroy
     UE_LOG(LogPoE2Framework, Log, TEXT("No handler made a pierce decision, projectile destroyed"));
     Destroy();
+}
+
+int32 APoE2ProjectileBase::GetActiveHandlerCount() const
+{
+    return ActiveHandlers.Num();
 }

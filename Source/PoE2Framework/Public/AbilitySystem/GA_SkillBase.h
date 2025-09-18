@@ -32,7 +32,9 @@ class POE2FRAMEWORK_API UGA_SkillBase : public UGameplayAbility
     GENERATED_BODY()
 
 public:
-    /** 
+    UGA_SkillBase();
+
+    /**
      * The main entry point for skill execution.
      * Expects TriggerEventData to contain the necessary context, such as the SkillDataAsset.
      */
@@ -116,6 +118,11 @@ public:
      */
     UFUNCTION(BlueprintImplementableEvent, Category = "Skill", meta = (DisplayName = "PerformSpawn"))
     void K2_PerformSpawn(const FSkillSpec& SkillSpec);
+
+protected:
+    /** When true (default), ExecuteSkillEffects will be invoked automatically if no Blueprint overrides PerformSpawn. */
+    UPROPERTY(EditDefaultsOnly, Category = "Skill")
+    bool bAutoExecuteSkillEffects;
 
 private:
     /** Animation callback for when the cast montage completes successfully. */

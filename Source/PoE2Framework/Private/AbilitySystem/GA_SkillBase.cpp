@@ -15,6 +15,12 @@
 #include "Core/PoE2Log.h"
 #include "Engine/World.h"
 #include "Animation/AnimMontage.h"
+#include "UObject/Class.h"
+
+UGA_SkillBase::UGA_SkillBase()
+    : bAutoExecuteSkillEffects(true)
+{
+}
 
 void UGA_SkillBase::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
     const FGameplayAbilityActorInfo* ActorInfo,
@@ -132,74 +138,84 @@ void UGA_SkillBase::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
         UPoE2CueManager::PlayLocalCue(Avatar, SkillDA->CueOnCast, LocalCueParams);
     }
     
-    // 6. 技能效果执行现在由蓝图控制
-    // 蓝图可以在合适的时机调用 ExecuteSkillEffects
+    // 6. 触发蓝图的 PerformSpawn 钩子，如果蓝图没有覆写，则自动执行默认逻辑
+    const bool bBlueprintOverridesPerformSpawn = GetClass()->IsFunctionImplementedInScript(GET_FUNCTION_NAME_CHECKED(UGA_SkillBase, K2_PerformSpawn));
+    K2_PerformSpawn(LocalSkillSpec);
+
+    if (bAutoExecuteSkillEffects && !bBlueprintOverridesPerformSpawn)
+    {
+        ExecuteSkillEffects(LocalSkillSpec);
+    }
 }
 
 void UGA_SkillBase::ExecuteSkillEffects(const FSkillSpec& LocalSkillSpec)
 {
-    // 声明 Handler 实例数组
     TArray<TScriptInterface<IMechanicHandler>> HandlerInstances;
-    
-    // 循环实例化 Handler
+    HandlerInstances.Reserve(LocalSkillSpec.MechanicHandlers.Num());
+
+    UAbilitySystemComponent* CasterASC = GetAbilitySystemComponentFromActorInfo();
+
     for (const TSubclassOf<UObject>& HandlerClass : LocalSkillSpec.MechanicHandlers)
     {
-        if (HandlerClass)
+        if (!HandlerClass)
         {
-            // 将 GA 自身作为 Outer，确保 Handler 的生命周期
-            UMechanicHandlerBase* NewHandler = NewObject<UMechanicHandlerBase>(this, HandlerClass);
-            if (NewHandler)
-            {
-                HandlerInstances.Add(NewHandler);
-            }
+            continue;
         }
-    }
-    
-    // 调用 OnCast：实例化所有 Handler 之后，立刻遍历 HandlerInstances 数组
-    for (const TScriptInterface<IMechanicHandler>& Handler : HandlerInstances)
-    {
-        if (Handler)
+
+        UMechanicHandlerBase* NewHandler = NewObject<UMechanicHandlerBase>(this, HandlerClass);
+        if (!NewHandler)
         {
-            IMechanicHandler::Execute_OnCast(Handler.GetObject(), GetAbilitySystemComponentFromActorInfo(), LocalSkillSpec);
+            continue;
         }
+
+        TScriptInterface<IMechanicHandler> HandlerInterface;
+        HandlerInterface.SetObject(NewHandler);
+        HandlerInterface.SetInterface(Cast<IMechanicHandler>(NewHandler));
+        if (!HandlerInterface.GetInterface())
+        {
+            UE_LOG(LogPoE2Framework, Warning, TEXT("UGA_SkillBase::ExecuteSkillEffects: Handler %s does not implement interface"), *HandlerClass->GetName());
+            continue;
+        }
+
+        IMechanicHandler::Execute_OnCast(NewHandler, CasterASC, LocalSkillSpec);
+        HandlerInstances.Add(HandlerInterface);
     }
-    
-    // 生成投掷物 - 移交完整职责
+
+    // 生成投掷物
     if (LocalSkillSpec.ProjectileClass)
     {
         if (APoE2ProjectileBase* Projectile = SpawnProjectile(LocalSkillSpec))
         {
-            // 初始化投掷物
-            Projectile->InitFromSpec(LocalSkillSpec);
+            Projectile->InitFromSpec(LocalSkillSpec, CasterASC, HandlerInstances);
         }
     }
-    
-    // 生成区域效果 - 移交完整职责
+
+    // 生成区域效果
     if (LocalSkillSpec.AreaClass)
     {
         if (APoE2AreaEffectBase* AreaEffect = SpawnArea(LocalSkillSpec))
         {
-            // TODO: AreaEffect->Initialize(LocalSkillSpec, GetAbilitySystemComponentFromActorInfo(), HandlerInstances);
+            AreaEffect->InitFromSpec(LocalSkillSpec, CasterASC, HandlerInstances);
         }
     }
-    
-    // 生成召唤物 - 移交完整职责
+
+    // 生成召唤物
     if (LocalSkillSpec.SummonClass)
     {
         AActor* Avatar = GetAvatarActorFromActorInfo();
         if (Avatar)
         {
-            FTransform BaseTransform = Avatar->GetActorTransform();
-            
-            for (int32 i = 0; i < LocalSkillSpec.SummonCount; ++i)
+            const FVector RightVector = Avatar->GetActorRightVector();
+
+            for (int32 Index = 0; Index < LocalSkillSpec.SummonCount; ++Index)
             {
-                // 为每个召唤物计算位置偏移
-                FVector Offset = FVector(i * 100.0f, 0, 0); // TODO: 更智能的位置计算
-                
                 if (APoE2MinionBase* Summon = SpawnSummon(LocalSkillSpec))
                 {
-                    // TODO: 应用位置偏移和初始化
-                    // TODO: Summon->Initialize(LocalSkillSpec, GetAbilitySystemComponentFromActorInfo(), HandlerInstances);
+                    const float Spread = 100.f;
+                    const float OffsetIndex = static_cast<float>(Index) - (static_cast<float>(LocalSkillSpec.SummonCount - 1) * 0.5f);
+                    const FVector SpawnLocation = Avatar->GetActorLocation() + (RightVector * OffsetIndex * Spread);
+                    Summon->SetActorLocation(SpawnLocation);
+                    Summon->InitFromSpec(LocalSkillSpec, CasterASC, HandlerInstances);
                 }
             }
         }
