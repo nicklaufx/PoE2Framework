@@ -6,6 +6,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Spec/SkillSpec.h"
+#include "AbilitySystem/Handlers/MechanicHandler.h"
 #include "PoE2ProjectileBase.generated.h"
 
 class UProjectileMovementComponent;
@@ -29,33 +30,45 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:
-	/**
-	 * @brief Initializes the projectile from a skill specification.
-	 * Called on the server after the projectile is spawned.
-	 * @param InSpec The skill spec to initialize from.
-	 */
-	virtual void InitFromSpec(const FSkillSpec& InSpec);
+        /**
+         * @brief Initializes the projectile from a skill specification.
+         * Called on the server after the projectile is spawned.
+         * @param InSpec The skill spec to initialize from.
+         * @param InOwnerASC Ability system component that spawned the projectile.
+         * @param HandlerPrototypes Mechanic handler instances cloned from the ability.
+         */
+        virtual void InitFromSpec(const FSkillSpec& InSpec, UAbilitySystemComponent* InOwnerASC, const TArray<TScriptInterface<IMechanicHandler>>& HandlerPrototypes);
+
+        virtual void Tick(float DeltaSeconds) override;
 
 protected:
-	/**
-	 * @brief Server-only logic to handle projectile hitting another actor.
-	 * @param OtherActor The actor that was hit.
-	 * @param HitResult The hit result from the collision.
-	 */
-	UFUNCTION()
-	virtual void OnHit(UPrimitiveComponent* HitComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+        /**
+         * @brief Server-only logic to handle projectile hitting another actor.
+         * @param OtherActor The actor that was hit.
+         * @param HitResult The hit result from the collision.
+         */
+        UFUNCTION()
+        virtual void OnHit(UPrimitiveComponent* HitComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
 
 public:
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement")
-	TObjectPtr<UProjectileMovementComponent> MovementComponent;
-	
+        UFUNCTION(BlueprintPure, Category = "Projectile|Mechanics")
+        int32 GetActiveHandlerCount() const;
+
+public:
+        UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement")
+        TObjectPtr<UProjectileMovementComponent> MovementComponent;
+
 	/** The Ability System Component of the owner of this projectile. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Projectile")
 	TObjectPtr<UAbilitySystemComponent> OwnerASC;
 	
-	/** The skill spec that this projectile was created from. */
-	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Replicated, Category = "Projectile")
-	FSkillSpec CurrentSpec;
+        /** The skill spec that this projectile was created from. */
+        UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Replicated, Category = "Projectile")
+        FSkillSpec CurrentSpec;
+
+        /** Runtime mechanic handler instances bound to this projectile. */
+        UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Projectile")
+        TArray<TScriptInterface<IMechanicHandler>> ActiveHandlers;
 
 	// TODO:
 	// 1. Replication Strategy: Determine if custom replication is needed for smoother movement, especially for networked games.
